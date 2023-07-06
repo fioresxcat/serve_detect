@@ -1,27 +1,19 @@
 import torch
+torch.set_float32_matmul_precision('medium')
+
+import pdb
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import List, Tuple, Dict, Optional, Union
 import pytorch_lightning as pl
-from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
-from model import MyAccuracy
-# class X3DModel(nn.Module):
-#     def __init__(self, version):
-#         super().__init__()
-#         model = torch.hub.load('facebookresearch/pytorchvideo', version, pretrained=True)
+from torchmetrics.classification import BinaryAccuracy
 
-#         self.blocks = model.blocks[:-1]
-#         self.head = nn.Sequential(
-#             nn.AdaptiveAvgPool3d((1, 1, 1)),
-#         )
 
 class X3DModule(pl.LightningModule):
     def __init__(
         self, 
         version, 
-        n_classes,
-        class_weight: List[float],
         learning_rate: float,
         reset_optimizer: bool,
         pos_weight: float,
@@ -29,31 +21,31 @@ class X3DModule(pl.LightningModule):
     ):
         super().__init__()
         self.model = torch.hub.load('facebookresearch/pytorchvideo', version, pretrained=True)
-        self.model.blocks[-1].proj = nn.Linear(in_features=2048, out_features=3, bias=True)
-        self.n_classes = n_classes
+        self.model.blocks[-1].proj = nn.Linear(in_features=2048, out_features=1, bias=True)
         self.learning_rate = learning_rate
         self.reset_optimizer = reset_optimizer
         self.pos_weight = pos_weight
         self.ev_diff_thresh = ev_diff_thresh
-        self.class_weight = class_weight
         self._init_loss_and_metrics()
 
 
     def _init_loss_and_metrics(self):
-        self.train_acc = MyAccuracy(self.ev_diff_thresh)
-        self.val_acc = MyAccuracy(self.ev_diff_thresh)
-        self.test_acc = MyAccuracy(self.ev_diff_thresh)
+        self.train_acc = BinaryAccuracy()
+        self.val_acc = BinaryAccuracy()
+        self.test_acc = BinaryAccuracy()
 
-        self.predict_acc = MyAccuracy(self.ev_diff_thresh)
+        self.predict_acc = BinaryAccuracy()
         self.preds, self.labels = torch.empty(size=(0, 3)), torch.empty(size=(0, 3))
 
 
-    def compute_logits_and_losses(self, imgs, pos, labels):
+    def compute_logits_and_losses(self, imgs, labels):
         logits = self.model(imgs)
-        loss = F.cross_entropy(
+        weight = torch.ones_like(labels)
+        weight[labels==1] = self.pos_weight
+        loss = F.binary_cross_entropy_with_logits(
             logits,
             labels,
-            weight=torch.tensor(self.class_weight, device=self.device),
+            weight=weight
         )
         return logits, loss
 
@@ -63,11 +55,15 @@ class X3DModule(pl.LightningModule):
     
 
     def step(self, batch, batch_idx, split):
-        imgs, pos, labels = batch
-        logits, loss = self.compute_logits_and_losses(imgs, pos, labels)
+        imgs, labels = batch
+        logits, loss = self.compute_logits_and_losses(imgs, labels)
 
         acc = getattr(self, f'{split}_acc')
         acc(logits, labels)
+
+        # if split in ['val', 'test']:
+        #     print('probs: ', torch.sigmoid(logits))
+        #     print('labels: ', labels)
 
         self.log_dict({
             f'{split}_loss': loss,
@@ -125,8 +121,8 @@ if __name__ == '__main__':
     config = EasyDict(config)
 
     model = X3DModule(**config.model)
-    model.eval().to('cuda')
-    imgs = torch.randn(2, 3, 9, 182, 182).to('cuda')
+    model.eval()
+    imgs = torch.randn(2, 3, 15, 182, 182)
     out = model(imgs)
     print(out.shape)
     pdb.set_trace()

@@ -2,6 +2,7 @@ import numpy as np
 import pdb
 from easydict import EasyDict
 from pytorch_lightning.utilities.types import EVAL_DATALOADERS, TRAIN_DATALOADERS
+from pathlib import Path
 import torch
 from torch.utils.data import Dataset, DataLoader
 import pickle
@@ -12,6 +13,10 @@ from PIL import Image
 import time
 from turbojpeg import TurboJPEG
 import albumentations as A
+from torchvision.transforms._transforms_video import (
+    CenterCropVideo,
+    NormalizeVideo,
+)
 
 
 def load_from_pickle(fp):
@@ -22,17 +27,16 @@ def load_from_pickle(fp):
 
 
 
-
 class ServeDataset(Dataset):
     def __init__(
         self,
         data_path,
         transforms, 
         mode,
+        masked,
         n_input_frames,
         n_sample_limit,
         crop_size,
-        already_cropped,
         do_augment=False,
         augment_props={},
     ):
@@ -45,33 +49,67 @@ class ServeDataset(Dataset):
         self.n_input_frames = n_input_frames
         self.n_sample_limit = int(n_sample_limit)
         self.crop_size = crop_size
-        self.already_cropped = already_cropped
         self.transforms = transforms
+        self.masked = masked
         self.jpeg_reader = TurboJPEG()
-
+        self.normalize_video = NormalizeVideo(
+            mean = [0.45, 0.45, 0.45],
+            std = [0.225, 0.225, 0.225]
+        )
+        self.label2id = {
+            'serve': 1,
+            'no_serve': 0
+        }
         self._init_paths_and_labels()
     
 
     def _init_paths_and_labels(self):
-        data_dict = load_from_pickle(self.data_path)
-        self.ls_img_paths = sorted(data_dict.keys())[:int(self.n_sample_limit)]
-        self.ls_labels = [data_dict[img_paths] for img_paths in self.ls_img_paths]
+        self.data_items = load_from_pickle(self.data_path)
+        
 
 
     def __len__(self):
-        return len(self.ls_img_paths)
+        return len(self.data_items)
     
 
     def __getitem__(self, index):
         item = self.data_items[index]
-        img_paths, yolo_anno_paths, label = item['img_paths'], item['yolo_anno_paths'], item['label']
-        
-        # process img
-        if self.already_cropped:
-            input_imgs, ls_norm_pos = self.get_already_cropped_images(img_paths, ls_norm_pos)
-        else:
-            input_imgs, ls_norm_pos = self.crop_images_from_paths(img_paths, ls_norm_pos)
-        
+        img_paths, label = item['img_paths'], item['label']
+        img_paths = img_paths[:self.n_input_frames]  # 15 by default
+
+        input_imgs = []
+        for fp in img_paths:
+            with open(fp, 'rb') as in_file:
+                resized_img = cv2.resize(self.jpeg_reader.decode(in_file.read(), 0), (self.crop_size[0], self.crop_size[1]))  # already rgb images
+            input_imgs.append(resized_img)
+        if len(input_imgs) < self.n_input_frames:
+            input_imgs.extend([input_imgs[-1]] * (self.n_input_frames - len(input_imgs)))
+
+        if self.masked:
+            txt_paths = [str(Path(img_fp).with_suffix('.txt')) for img_fp in img_paths]
+            for i, txt_fp in enumerate(txt_paths):
+                with open(txt_fp, 'r') as f:
+                    lines = f.readlines()
+                img = input_imgs[i]
+                mask = np.zeros_like(img)[:, :, 0]
+                for line in lines:
+                    cl, x, y, w, h = line.strip().split()[:5]
+                    cl = int(cl)
+                    x, y, w, h = float(x), float(y), float(w), float(h)
+                    if cl == 1:
+                        xmin = (x - w/2) * img.shape[1]
+                        ymin = (y - h/2) * img.shape[0]
+                        xmax = (x + w/2) * img.shape[1]
+                        ymax = (y + h/2) * img.shape[0]
+                        mask[ymin:ymax, xmin:xmax, :] = 1
+                    elif cl == 0:
+                        pts = [float(el) for el in line.strip().split()[5:]]
+                        pts = np.array(pts).reshape(-1, 2) * np.array([img.shape[1], img.shape[0]])
+                        pts = pts.astype(np.int32)
+                        mask = cv2.drawContours(mask, [pts], -1, 255, -1)
+                input_imgs[i] = cv2.bitwise_and(img, img, mask=mask)
+
+
 
         if self.mode == 'train' and np.random.rand() < self.augment_props.augment_img_prob:
             transformed = self.transforms(
@@ -84,33 +122,32 @@ class ServeDataset(Dataset):
                 image5=input_imgs[6],
                 image6=input_imgs[7],
                 image7=input_imgs[8],
+                image8=input_imgs[9],
+                image9=input_imgs[10],
+                image10=input_imgs[11],
+                image11=input_imgs[12],
+                image12=input_imgs[13],
+                image13=input_imgs[14],
             )
             transformed_imgs = [transformed[k] for k in sorted([k for k in transformed.keys() if k.startswith('image')])]
-            transformed_imgs = np.concatenate(transformed_imgs, axis=2)
-            transformed_imgs = torch.tensor(transformed_imgs)
+            transformed_imgs = np.stack(transformed_imgs, axis=0)
         else:
-            transformed_imgs = torch.tensor(np.concatenate(input_imgs, axis=2))
+            transformed_imgs = np.stack(input_imgs, axis=0)   # shape 15 x h x w x 3
 
         # normalize
-        transformed_imgs = transformed_imgs.permute(2, 0, 1) / 255.
+        transformed_imgs = torch.from_numpy(transformed_imgs)
+        transformed_imgs = transformed_imgs.permute(3, 0, 1, 2) # shape 3 x 15 x h x w
+        transformed_imgs = transformed_imgs / 255.0
+        transformed_imgs = self.normalize_video(transformed_imgs)
 
-        # construct event target
-        if event_target[0] != 0:
-            event_target = torch.tensor([event_target[0], 0, 1-event_target[0]], dtype=torch.float)
-        elif event_target[1] != 0:
-            event_target = torch.tensor([0, event_target[1], 1-event_target[1]], dtype=torch.float)
+        if self.mode == 'predict':
+            return img_paths, transformed_imgs, torch.tensor(self.label2id[label], dtype=torch.float)
         else:
-            event_target = torch.tensor([0, 0, 1], dtype=torch.float)
-
-        if self.mode != 'predict':
-            return transformed_imgs, torch.tensor(ls_norm_pos), event_target
-        else:
-            return img_paths, transformed_imgs, torch.tensor(ls_norm_pos), event_target
+            return transformed_imgs, torch.tensor([self.label2id[label]], dtype=torch.float)
 
 
 
-
-class EventDataModule(pl.LightningDataModule):
+class ServeDataModule(pl.LightningDataModule):
     def __init__(
         self,
         train_path,
@@ -120,7 +157,7 @@ class EventDataModule(pl.LightningDataModule):
         data_cfg: dict, 
         training_cfg: dict
     ):
-        super(EventDataModule, self).__init__()
+        super(ServeDataModule, self).__init__()
         self.train_path = train_path
         self.val_path = val_path
         self.test_path = test_path
@@ -129,12 +166,22 @@ class EventDataModule(pl.LightningDataModule):
         self.training_cfg = EasyDict(training_cfg)
 
         if self.data_cfg.do_augment:
-            if self.data_cfg.n_input_frames == 3:
-                add_target = {'image0': 'image', 'image1': 'image'}
-            elif self.data_cfg.n_input_frames == 5:
-                add_target = {'image0': 'image', 'image1': 'image', 'image2': 'image', 'image3': 'image'}
-            elif self.data_cfg.n_input_frames == 9:
-                add_target = {'image0': 'image', 'image1': 'image', 'image2': 'image', 'image3': 'image', 'image4': 'image', 'image5': 'image', 'image6': 'image', 'image7': 'image'}
+            add_target = {
+                'image0': 'image', 
+                'image1': 'image', 
+                'image2': 'image', 
+                'image3': 'image', 
+                'image4': 'image', 
+                'image5': 'image', 
+                'image6': 'image', 
+                'image7': 'image',
+                'image8': 'image',
+                'image9': 'image',
+                'image10': 'image',
+                'image11': 'image',
+                'image12': 'image',
+                'image13': 'image',
+            }
             
             self.transforms = A.Compose(
                 A.SomeOf([
@@ -202,7 +249,7 @@ if __name__ == '__main__':
     import yaml
     from easydict import EasyDict
 
-    with open('config.yaml', 'r') as f:
+    with open('config_3d.yaml', 'r') as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
     config = EasyDict(config)
 
@@ -212,12 +259,18 @@ if __name__ == '__main__':
         mode='test',
         **config.data.data_cfg
     )
+    ds_loader = DataLoader(
+        ds,
+        batch_size=4,
+        shuffle=False,
+        num_workers=1,
+        pin_memory=False
+    )
 
-    for i, item in enumerate(ds):
-        imgs, pos, ev = item
+    for i, item in enumerate(ds_loader):
+        imgs, label = item
         print(imgs.shape)
-        print(pos.shape)
-        print(ev.shape)
+        print(label.shape)
         break
     pdb.set_trace()
     print('ok')

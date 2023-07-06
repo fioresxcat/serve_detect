@@ -2,15 +2,15 @@ import os
 import json
 from pathlib import Path
 import torch
+torch.set_float32_matmul_precision('medium')
+
 import numpy as np
 import yaml
 import shutil
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar, LearningRateMonitor, RichModelSummary
 from pytorch_lightning.cli import LightningCLI
-from dataset_event import EventDataModule
-from model import EventClassifierModule
-from dataset import EventDataModule3D
+from dataset_3d import ServeDataModule
 from model_3d import X3DModule
 
 
@@ -30,7 +30,7 @@ class MyLightningCLI(LightningCLI):
 def cli_main():
     cli = MyLightningCLI(
         X3DModule,
-        EventDataModule3D,
+        ServeDataModule,
         parser_kwargs={"parser_mode": "omegaconf"},
         save_config_overwrite=False
     )

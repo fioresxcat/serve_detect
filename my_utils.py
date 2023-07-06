@@ -6,6 +6,7 @@ import json
 import pickle
 import pdb
 import albumentations as A
+import shutil
 
 
 
@@ -358,15 +359,44 @@ def crop_img_for_event_cls_2(ev_data_fp, out_dir, split, crop_size=(320, 128)):
         f.write(bin)
 
 
+def gen_data_for_serve_detect():
+    data_dir = 'serve_detection_data_1280_1280'
+    for split in ['train', 'val', 'test']:
+        items = []
+        split_dir = os.path.join(data_dir, split)
+        for cl_name in ['pos', 'neg']:
+            cl_dir = os.path.join(split_dir, cl_name)
+            for subdir_name in os.listdir(cl_dir):
+                subdir = os.path.join(cl_dir, subdir_name)
+                item = {}
+                item['img_paths'] = [str(fp) for fp in sorted(list(Path(subdir).glob('*.jpg')))]
+                item['label'] = 'serve' if cl_name == 'pos' else 'no_serve'
+                items.append(item)
+                print('done')
+        
+        item_bin = pickle.dumps(items)
+        with open(os.path.join(f'data/serve_detect_{split}.pkl'), 'wb') as f:
+            f.write(item_bin)
+        
+
+
 if __name__ == '__main__':
     np.random.seed(42)
 
-    for split in ['test', 'val', 'train']:
-        if split != 'train':
-            continue
-        ev_data_fp = f'data/{split}_event_new_9.pkl'
-        out_dir = f'cropped_data_320_128/{split}'
-        crop_img_for_event_cls_2(ev_data_fp, out_dir, split)
+    # gen_data_for_serve_detect()
+    for split in ['train', 'val', 'test']:
+        with open(f'data/serve_detect_{split}.pkl', 'rb') as f:
+            items = pickle.load(f)
+        print(items[0])
+        print(len(items))
+        pdb.set_trace()
+    
+    # for split in ['test', 'val', 'train']:
+    #     if split != 'train':
+    #         continue
+    #     ev_data_fp = f'data/{split}_event_new_9.pkl'
+    #     out_dir = f'cropped_data_320_128/{split}'
+    #     crop_img_for_event_cls_2(ev_data_fp, out_dir, split)
 
     # with open('data/test_event_cropped_9_128_128.pkl', 'rb') as f:
     #     data = pickle.load(f)

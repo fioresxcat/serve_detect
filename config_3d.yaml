@@ -5,7 +5,7 @@ trainer:
   max_epochs: 100
   min_epochs: 30
   accelerator: gpu
-  precision: 32
+  precision: 16
   accumulate_grad_batches: 3
   auto_lr_find: false
   profiler: null
@@ -13,7 +13,7 @@ trainer:
   logger:
     class_path: pytorch_lightning.loggers.TensorBoardLogger
     init_args:
-      save_dir: 'ckpt_3d/exp1_ce_loss_remake_label_182_182_320_128'
+      save_dir: 'ckpt_3d/exp2_no_mask'
       name: ''
       version: ''
 
@@ -22,9 +22,9 @@ trainer:
       init_args:
         dirpath: ${trainer.logger.init_args.save_dir}
         filename: '{epoch}-{train_loss:.3f}-{val_loss:.3f}-{train_acc:.3f}-{val_acc:.3f}'
-        monitor: val_acc
-        save_top_k: 2
-        mode: max
+        monitor: val_loss
+        save_top_k: 3
+        mode: min
         every_n_epochs: 1
         auto_insert_metric_name: true
 
@@ -77,43 +77,31 @@ trainer:
 
  
 model:
-  version: x3d_xs
-  n_classes: 3
-  class_weight:
-  - 1.
-  - 1.
-  - 1.
+  version: x3d_s
   learning_rate: 1.0e-03
   reset_optimizer: false
-  pos_weight: 0.7
+  pos_weight: 2
   ev_diff_thresh: 0.25
         
 data:
-  # train_path: 'data/train_event_new_9.pkl'
-  # val_path: 'data/val_event_new_9.pkl'
-  # test_path: 'data/test_event_new_9.pkl'
-
-  train_path: data/train_event_cropped_9_320_128.pkl
-  val_path: data/val_event_cropped_9_320_128.pkl
-  test_path: data/test_event_cropped_9_320_128.pkl
-  predict_path: data/test_event_cropped_9_320_128.pkl
-
+  train_path: data/serve_detect_train.pkl
+  val_path: data/serve_detect_val.pkl
+  test_path: data/serve_detect_test.pkl
+  predict_path: data/serve_detect_test.pkl
 
   data_cfg: 
-    n_input_frames: 9
+    n_input_frames: 15
     n_sample_limit: 1.0e+09
+    masked: false
     crop_size:
-    - 182
-    - 182
+    - 256
+    - 256
     do_augment: true
-    already_cropped: true
     augment_props:
       augment_img_prob: 0.3
-      mask_ball_prob: 0.15
-      max_mask_ball: 3
 
   training_cfg:
-    bs: 16
+    bs: 2
     shuffle_train: true
     num_workers: 8
 

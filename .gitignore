@@ -1,1 +1,4 @@
-data/
+serve_detection_data_1280_1280/
+ckpt_3d/
+serve_detection_data_1280_1280.zip
+.vscode
